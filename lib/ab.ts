@@ -1,35 +1,42 @@
 /**
- * lib/ab.ts — Read A/B test variants in your components
+ * lib/ab.ts — Variant assignment for server components
  * 
- * USAGE IN A SERVER COMPONENT:
+ * Call assignVariant() in your [slug]/page.tsx to determine which
+ * variant to show. Uses the same deterministic hash as middleware.
  * 
- *   import { getVariant, getVariantMeta } from '@/lib/ab';
- * 
- *   export default async function Page() {
- *     const variant = await getVariant('hero');        // "A" or "B"
- *     const meta = await getVariantMeta('hero');       // { headline: "...", bg: "..." } or null
- *     
- *     return <h1>{meta?.headline || 'Default Headline'}</h1>
- *   }
- * 
- * USAGE IN A CLIENT COMPONENT:
- *   Just read the cookie directly:
- *   document.cookie → "ab-hero=B; ab-hero-meta={...}"
- *   Or pass variant as a prop from a server component (preferred, no flicker)
+ * The variant is based on:
+ * - User's ab-uid cookie (persistent across sessions)
+ * - The post ID (so each test is independent)
+ * - Number of variants from ACF
  */
 
-import { cookies } from 'next/headers';
+import { cookies, headers } from 'next/headers';
 
-/** Get the variant value for a test (e.g. "A", "B", or "0", "1" for redirects) */
-export async function getVariant(testId: string): Promise<string | null> {
+/**
+ * Get the assigned variant index for a page.
+ * 
+ * @param postId - WordPress post/page ID
+ * @param variantCount - Total variants INCLUDING control (e.g. 3 = control + 2 variants)
+ * @returns variant index: 0 = control, 1+ = ACF variants
+ */
+export async function assignVariant(postId: number, variantCount: number): Promise<number> {
+  if (variantCount <= 1) return 0; // No variants = always control
+
+  // Get UID from header (set by middleware) or cookie
+  const headerStore = await headers();
   const cookieStore = await cookies();
-  return cookieStore.get(`ab-${testId}`)?.value || null;
+  const uid = headerStore.get('x-ab-uid') || cookieStore.get('ab-uid')?.value || 'anonymous';
+
+  return hashToVariant(String(uid), String(postId), variantCount);
 }
 
-/** Get the meta overrides for a test (headline, bg, ctaText, etc.) */
-export async function getVariantMeta(testId: string): Promise<Record<string, string> | null> {
-  const cookieStore = await cookies();
-  const raw = cookieStore.get(`ab-${testId}-meta`)?.value;
-  if (!raw) return null;
-  try { return JSON.parse(raw); } catch { return null; }
+/** FNV-1a hash — must match middleware.ts exactly */
+function hashToVariant(uid: string, testKey: string, variantCount: number): number {
+  const str = uid + ':' + testKey;
+  let hash = 2166136261;
+  for (let i = 0; i < str.length; i++) {
+    hash ^= str.charCodeAt(i);
+    hash = (hash * 16777619) >>> 0;
+  }
+  return hash % variantCount;
 }
